@@ -37,7 +37,46 @@ fi
 config_file="${HERMES_HOME:-$HOME/.hermes}/config.yaml"
 config_content="$($safe_io read 65536 "$config_file" 2>/dev/null || true)"
 if [[ -n "$config_content" ]]; then
-  active_model="$(awk -F': *' '$1 == "model" { value=$2; gsub(/"/, "", value); print value; exit }' <<<"$config_content")"
+  # Hermes stores the model as a mapping block:
+  #   model:
+  #     default: <name>
+  # Accept both `model: <name>` (scalar) and `default: <name>` nested under a
+  # `model:` block (first key wins; a new top-level key ends the block).
+  # Key/value anchors are stripped BEFORE whitespace trimming so re-joined text
+  # can never look like a key. A "#" is a comment only at value start or after
+  # whitespace (YAML rule), so hash-bearing names (`gpt-4o#v2`) and URL
+  # fragments survive; CR/CRLF and control characters are stripped last.
+  active_model="$(awk '
+    function clean(v) {
+      sub(/\r$/, "", v)
+      sub(/^model:[[:space:]]*/, "", v)
+      sub(/^[[:space:]]+default:[[:space:]]*/, "", v)
+      if (v ~ /^#/) sub(/^#.*/, "", v)
+      else sub(/[[:space:]]+#[^#]*$/, "", v)
+      gsub(/[[:space:]]/, " ", v)
+      sub(/^ +/, "", v)
+      sub(/ +$/, "", v)
+      gsub(/[[:cntrl:]]/, "", v)
+      gsub(/["'"'"'`]/, "", v)
+      return v
+    }
+    !found {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^model:/) {
+        val = clean(line)
+        if (val != "") { print val; found=1; exit }
+        inblock=1; next
+      } else if (inblock) {
+        if (line !~ /^[[:space:]]+/) {
+          inblock=0
+        } else if (line ~ /^[[:space:]]+default:/) {
+          val = clean(line)
+          if (val != "") { print val; found=1; exit }
+        }
+      }
+    }
+  ' <<<"$config_content")"
 fi
 if [[ -z "$active_model" ]]; then
   active_model="$(jq -r '.activeModel // ""' <<<"$base" 2>/dev/null)"
